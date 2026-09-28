@@ -81,3 +81,28 @@
   margin-top: 1rem;
   margin-bottom: 1rem;
 }
+
+#col-item.swiping {
+  position: relative;
+  overflow: hidden;
+}
+#col-item.swiping > .content {
+  transform: translateX(var(--swipe-dx, 0px));
+}
+#col-item.swiping > .swipe-peek {
+  position: absolute;
+  top: var(--swipe-top, 0px);
+  left: 0;
+  right: 0;
+  bottom: 0;
+  overflow: hidden;
+  background-color: var(--v-bg);
+  transform: translateX(calc(var(--swipe-dx, 0px) + var(--swipe-side) * 100%));
+}
+#col-item.swipe-animate > .content,
+#col-item.swipe-animate > .swipe-peek {
+  transition: transform 180ms ease-out;
+}
+#col-item:not(.swiping) > .swipe-peek {
+  display: none;
+}

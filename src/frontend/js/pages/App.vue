@@ -459,6 +459,12 @@
       <div
         v-if="itemSelectedDetails"
         ref="content"
+        v-swipe="{
+          navigate: navigateToItem,
+          peek: swipePeekAt,
+          selected: itemSelected,
+          loaded: itemSelectedDetails.id,
+        }"
         class="content px-4 pt-3 pb-5 border-top overflow-auto"
         :class="{
           'font-sans-serif': theme.font == '',
@@ -494,6 +500,34 @@
             <video class="w-100" controls v-for="media in contentVideos" :src="media.url"></video>
           </div>
           <div v-html="itemSelectedContent"></div>
+        </div>
+      </div>
+      <div
+        v-if="swipePeek"
+        class="content swipe-peek px-4 pt-3 pb-5 border-top"
+        :class="{
+          'font-sans-serif': theme.font == '',
+          'font-serif': theme.font == 'serif',
+          'font-monospace': theme.font == 'monospace',
+        }"
+        :style="{ 'font-size': theme.size + 'rem', '--swipe-side': swipePeek.side }">
+        <div class="content-wrapper">
+          <h1>
+            <b>{{ swipePeek.item.title || $t("untitled") }}</b>
+          </h1>
+          <div class="opacity-50">
+            <div>{{ (feedsById[swipePeek.item.feed_id] || {}).title }}</div>
+            <time>{{ formatDate(swipePeek.item.date) }}</time>
+          </div>
+          <hr />
+          <figure
+            v-for="media in (swipePeek.item.media_links || []).filter(l => l.type === 'image')">
+            <img :src="media.url" loading="lazy" />
+            <figcaption v-if="media.description">
+              {{ media.description }}
+            </figcaption>
+          </figure>
+          <div v-html="swipePeek.item.content || ''"></div>
         </div>
       </div>
     </div>
@@ -532,6 +566,7 @@ import toast from "../components/toast.vue";
 import type { FeedTreeNode, TreeFeedNode, TreeFolderNode } from "../components/feedtree.vue";
 import scrollDir from "../directives/scroll";
 import focusDir from "../directives/focus";
+import swipeDir from "../directives/swipe";
 import { defineComponent } from "vue";
 import type {
   Feed,
@@ -566,6 +601,9 @@ type Stats = { unread: number; starred: number };
 
 var TITLE = document.title;
 
+const swipeCache = new Map<number, Item>();
+let itemLoadGeneration = 0;
+
 export default defineComponent({
   mixins: [debounceMixin],
   components: {
@@ -582,6 +620,7 @@ export default defineComponent({
   directives: {
     scroll: scrollDir,
     focus: focusDir,
+    swipe: swipeDir,
   },
   async created() {
     this.updateMetaTheme();
@@ -628,6 +667,7 @@ export default defineComponent({
       itemSelected: null as number | null,
       itemSelectedDetails: null as Item | null,
       itemSelectedReadability: "",
+      swipePeek: null as { side: number; item: Item } | null,
       itemSearch: "",
       itemSortNewestFirst: s.sort_newest_first as boolean,
       itemListWidth: s.item_list_width || 300,
@@ -842,6 +882,7 @@ export default defineComponent({
       }
     },
     async itemSelected(newVal, oldVal) {
+      const generation = ++itemLoadGeneration;
       this.itemSelectedReadability = "";
       if (newVal === null) {
         this.itemSelectedDetails = null;
@@ -849,7 +890,13 @@ export default defineComponent({
       }
       if (this.$refs.content) this.$refs.content.scrollTop = 0;
 
-      const [itemErr, item] = await to(api.items.get(newVal));
+      const cached = swipeCache.get(newVal);
+      const inList = this.items.find(i => i.id === newVal);
+      const [itemErr, item] =
+        cached && inList
+          ? [null, { ...cached, status: inList.status }]
+          : await to(api.items.get(newVal));
+      if (generation !== itemLoadGeneration) return;
       if (itemErr) {
         this.$refs.toast.addToast(
           { title: this.$t("fail_load"), description: this.errDescription(itemErr) },
@@ -858,6 +905,7 @@ export default defineComponent({
         return;
       }
       this.itemSelectedDetails = item;
+      this.prefetchNeighbours();
       const details = this.itemSelectedDetails;
       if (details.status == "unread") {
         const [updateErr] = await to(api.items.update(details.id, { status: "read" }));
@@ -1231,6 +1279,7 @@ export default defineComponent({
 
       var itemInList = this.items.find(i => i.id == item.id);
       if (itemInList) itemInList.status = newstatus;
+      if (this.itemSelectedDetails?.id === item.id) this.itemSelectedDetails.status = newstatus;
       item.status = newstatus;
     },
     toggleItemStarred(item: Item) {
@@ -1355,7 +1404,7 @@ export default defineComponent({
       }
 
       var newPosition = itemPosition + relativePosition;
-      if (newPosition < 0 || newPosition >= this.items.length) return;
+      if (newPosition < 0 || newPosition >= this.items.length) return false;
 
       this.itemSelected = this.items[newPosition].id;
 
@@ -1366,6 +1415,32 @@ export default defineComponent({
 
         this.loadMoreItems();
       });
+      return true;
+    },
+    swipePeekAt(side: number) {
+      const pos = this.items.findIndex(x => x.id === this.itemSelected) + side;
+      const loading = this.itemSelectedDetails?.id !== this.itemSelected;
+      if (side === 0 || loading || pos < 0 || pos >= this.items.length) {
+        this.swipePeek = null;
+        return false;
+      }
+      const item = this.items[pos];
+      this.swipePeek = { side, item: swipeCache.get(item.id) || item };
+      return true;
+    },
+    prefetchNeighbours() {
+      const pos = this.items.findIndex(x => x.id === this.itemSelected);
+      if (pos === -1) return;
+      for (const neighbour of [this.items[pos - 1], this.items[pos + 1]]) {
+        if (!neighbour || swipeCache.has(neighbour.id)) continue;
+        api.items.get(neighbour.id).then(
+          item => {
+            swipeCache.set(item.id, item);
+            if (swipeCache.size > 10) swipeCache.delete(swipeCache.keys().next().value!);
+          },
+          () => {},
+        );
+      }
     },
     // navigation helper, navigate relative to selected feed
     navigateToFeed(relativePosition: number) {
